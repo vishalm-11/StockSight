@@ -51,9 +51,9 @@ export default function PortfolioDashboard() {
       <div className="max-w-7xl mx-auto">
         <div className="mb-8">
           <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
-            StockSight
+            StockShelf
           </h1>
-          <p className="text-slate-400">Track your investments in real-time</p>
+          <p className="text-slate-400">Your personal investment shelf</p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
