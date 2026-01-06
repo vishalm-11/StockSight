@@ -45,6 +45,13 @@ export default function PortfolioDashboard() {
   const fetchTransactions = async () => {
     try {
       const res = await fetch('/api/transactions');
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Non-JSON response:', text);
+        setLoading(false);
+        return;
+      }
       const data = await res.json();
       setTransactions(data);
       await processHoldings(data);
@@ -58,6 +65,12 @@ export default function PortfolioDashboard() {
   const fetchSnapshots = async () => {
     try {
       const res = await fetch('/api/portfolio-snapshots');
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Non-JSON response:', text);
+        return;
+      }
       const data = await res.json();
       setSnapshots(data);
       setFilteredSnapshots(data);
@@ -66,8 +79,13 @@ export default function PortfolioDashboard() {
     }
   };
 
-  const filterToCurrentHoldings = () => {
-    if (transactions.length === 0 || holdings.length === 0) return;
+  const filterToCurrentHoldings = async () => {
+    if (showAllHistory === false) return; // Already filtered, don't do anything
+    
+    if (transactions.length === 0 || holdings.length === 0) {
+      alert('No transactions or holdings available to filter');
+      return;
+    }
 
     // Get all tickers in current holdings
     const currentTickers = holdings.map(h => h.ticker);
@@ -77,6 +95,7 @@ export default function PortfolioDashboard() {
     
     if (currentHoldingsTxns.length === 0) {
       setFilteredSnapshots([]);
+      setShowAllHistory(false);
       return;
     }
 
@@ -85,12 +104,135 @@ export default function PortfolioDashboard() {
     );
 
     // Filter snapshots to only show dates after the earliest current holding
-    const filtered = snapshots.filter(s => new Date(s.date) >= earliestDate);
-    setFilteredSnapshots(filtered);
+    const dateFiltered = snapshots.filter(s => new Date(s.date) >= earliestDate);
+
+    // Get unique dates for fetching historical prices
+    const uniqueDates = [...new Set(dateFiltered.map(s => s.date))];
+
+    // Fetch historical prices for current holdings on all snapshot dates
+    let historicalPrices: { [key: string]: { [date: string]: number } } = {};
+    
+    try {
+      const res = await fetch('/api/historical-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tickers: currentTickers,
+          dates: uniqueDates
+        }),
+      });
+
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const priceData = await res.json();
+        
+        // Organize prices by ticker and date for easy lookup
+        priceData.forEach((price: any) => {
+          if (!historicalPrices[price.ticker]) {
+            historicalPrices[price.ticker] = {};
+          }
+          historicalPrices[price.ticker][price.date] = price.close;
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching historical prices:', error);
+      // Fall back to proportional estimation if API fails
+    }
+
+    // Recalculate cost and value for each snapshot based only on current holdings
+    const recalculated = dateFiltered.map(snapshot => {
+      const snapshotDate = new Date(snapshot.date);
+      const snapshotDateStr = snapshotDate.toISOString().split('T')[0];
+      
+      // Get all transactions for current holdings up to this snapshot date
+      const txnsUpToDate = currentHoldingsTxns.filter(
+        t => new Date(t.transaction_date) <= snapshotDate
+      );
+
+      if (txnsUpToDate.length === 0) {
+        return {
+          ...snapshot,
+          total_cost: 0,
+          total_value: 0,
+          total_gain: 0
+        };
+      }
+
+      // Calculate holdings for each ticker (shares and cost)
+      const holdingsMap: { [key: string]: { shares: number; cost: number } } = {};
+      
+      txnsUpToDate.forEach(txn => {
+        if (!holdingsMap[txn.ticker]) {
+          holdingsMap[txn.ticker] = { shares: 0, cost: 0 };
+        }
+        holdingsMap[txn.ticker].shares += txn.shares;
+        holdingsMap[txn.ticker].cost += txn.shares * txn.price;
+      });
+
+      // Calculate total cost for current holdings only
+      const recalculatedCost = Object.values(holdingsMap).reduce(
+        (sum, h) => sum + h.cost,
+        0
+      );
+
+      // Calculate total value using historical prices
+      let recalculatedValue = 0;
+      let hasHistoricalPrices = false;
+
+      // Check if this is today's date
+      const today = new Date();
+      const isToday = snapshotDateStr === today.toISOString().split('T')[0];
+
+      // For today's date, use current live prices from holdings
+      if (isToday) {
+        Object.entries(holdingsMap).forEach(([ticker, holding]) => {
+          const currentHolding = holdings.find(h => h.ticker === ticker);
+          if (currentHolding) {
+            recalculatedValue += holding.shares * currentHolding.currentPrice;
+            hasHistoricalPrices = true;
+          }
+        });
+      } else {
+        // For historical dates, use historical prices from database
+        Object.entries(holdingsMap).forEach(([ticker, holding]) => {
+          const price = historicalPrices[ticker]?.[snapshotDateStr];
+          if (price !== undefined) {
+            recalculatedValue += holding.shares * price;
+            hasHistoricalPrices = true;
+          }
+        });
+      }
+
+      // If we don't have historical prices (and it's not today), fall back to proportional estimation
+      if (!hasHistoricalPrices && !isToday) {
+        const allTxnsUpToDate = transactions.filter(
+          t => new Date(t.transaction_date) <= snapshotDate
+        );
+        const allTimeTotalCost = allTxnsUpToDate.reduce(
+          (sum, txn) => sum + (txn.shares * txn.price),
+          0
+        );
+        const costRatio = allTimeTotalCost > 0 ? recalculatedCost / allTimeTotalCost : 0;
+        recalculatedValue = snapshot.total_value * costRatio;
+      }
+
+      const recalculatedGain = recalculatedValue - recalculatedCost;
+
+      return {
+        ...snapshot,
+        total_cost: Math.round(recalculatedCost * 100) / 100,
+        total_value: Math.round(recalculatedValue * 100) / 100,
+        total_gain: Math.round(recalculatedGain * 100) / 100,
+      };
+    });
+
+    setFilteredSnapshots(recalculated);
     setShowAllHistory(false);
   };
 
   const showAllSnapshots = () => {
+    if (showAllHistory === true) return; // Already showing all, don't do anything
+    
     setFilteredSnapshots(snapshots);
     setShowAllHistory(true);
   };
@@ -102,15 +244,25 @@ export default function PortfolioDashboard() {
         method: 'POST',
       });
       
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Non-JSON response:', text);
+        alert('Failed to refresh data. Check console for errors.');
+        return;
+      }
+
+      const data = await res.json();
+      
       if (res.ok) {
         await fetchSnapshots();
         alert('Data refreshed successfully!');
       } else {
-        alert('Failed to refresh data. Check console for errors.');
+        alert(`Failed to refresh data: ${data.error || 'Unknown error'}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error refreshing data:', error);
-      alert('Error refreshing data');
+      alert(`Error refreshing data: ${error.message || 'Network error'}`);
     } finally {
       setRefreshing(false);
     }
@@ -142,6 +294,13 @@ export default function PortfolioDashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tickers }),
       });
+
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Non-JSON response from stock-prices:', text);
+        throw new Error('Invalid response from stock prices API');
+      }
 
       const priceData = await res.json();
 
@@ -237,16 +396,26 @@ export default function PortfolioDashboard() {
         }),
       });
 
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Non-JSON response:', text);
+        alert(`Error adding transaction: ${res.status} ${res.statusText}`);
+        return;
+      }
+
+      const data = await res.json();
+
       if (res.ok) {
         setShowAddForm(false);
         setFormData({ ticker: '', shares: '', price: '', date: new Date().toISOString().split('T')[0] });
         fetchTransactions();
       } else {
-        alert('Error adding transaction');
+        alert(`Error adding transaction: ${data.error || 'Unknown error'}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error:', error);
-      alert('Error adding transaction');
+      alert(`Error adding transaction: ${error.message || 'Network error'}`);
     }
   };
 
@@ -259,15 +428,27 @@ export default function PortfolioDashboard() {
       const transactionsToDelete = transactions.filter(t => t.ticker === ticker);
       
       for (const txn of transactionsToDelete) {
-        await fetch(`/api/transactions/${txn.id}`, {
+        const res = await fetch(`/api/transactions/${txn.id}`, {
           method: 'DELETE',
         });
+
+        const contentType = res.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await res.text();
+          console.error('Non-JSON response:', text);
+          throw new Error(`Failed to delete transaction: ${res.status} ${res.statusText}`);
+        }
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to delete transaction');
+        }
       }
 
       fetchTransactions();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error deleting transactions:', error);
-      alert('Error deleting transactions');
+      alert(`Error deleting transactions: ${error.message || 'Unknown error'}`);
     }
   };
 
@@ -284,9 +465,9 @@ export default function PortfolioDashboard() {
       <div className="max-w-7xl mx-auto">
         <div className="mb-8">
           <h1 className="text-5xl font-bold mb-2 bg-gradient-to-r from-purple-400 to-purple-200 bg-clip-text text-transparent">
-            StockShelf
+            StockSight
           </h1>
-          <p className="text-gray-400">Your personal investment shelf</p>
+          <p className="text-gray-400">Your personal trading partner</p>
         </div>
 
         {fetchingPrices && (
@@ -343,10 +524,10 @@ export default function PortfolioDashboard() {
               <button
                 onClick={filterToCurrentHoldings}
                 disabled={!showAllHistory}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all
                   ${!showAllHistory
-                    ? 'bg-purple-800 text-purple-300 cursor-not-allowed'
-                    : 'bg-purple-600 hover:bg-purple-700 text-white'}
+                    ? 'bg-purple-800/50 text-purple-300 cursor-not-allowed opacity-50'
+                    : 'bg-purple-600 hover:bg-purple-700 text-white cursor-pointer'}
                 `}
               >
                 Current Holdings Only
@@ -355,10 +536,10 @@ export default function PortfolioDashboard() {
               <button
                 onClick={showAllSnapshots}
                 disabled={showAllHistory}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all
                   ${showAllHistory
-                    ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
-                    : 'bg-zinc-600 hover:bg-zinc-500 text-white'}
+                    ? 'bg-zinc-700/50 text-zinc-400 cursor-not-allowed opacity-50'
+                    : 'bg-zinc-600 hover:bg-zinc-500 text-white cursor-pointer'}
                 `}
               >
                 Show All History
@@ -409,7 +590,7 @@ export default function PortfolioDashboard() {
                     cx="50%"
                     cy="50%"
                     labelLine={false}
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(1)}%`}
+                    label={({ name, percent }) => `${name} ${((percent || 0) * 100).toFixed(1)}%`}
                     outerRadius={100}
                     fill="#8884d8"
                     dataKey="value"
@@ -419,7 +600,7 @@ export default function PortfolioDashboard() {
                     ))}
                   </Pie>
                   <Tooltip 
-                    formatter={(value: number) => `${value.toFixed(2)}`}
+                    formatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(2)}` : ''}
                     contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px' }}
                     labelStyle={{ color: '#fff' }}
                   />
@@ -436,7 +617,7 @@ export default function PortfolioDashboard() {
                   <XAxis dataKey="ticker" stroke="#9ca3af" />
                   <YAxis stroke="#9ca3af" />
                   <Tooltip 
-                    formatter={(value: number) => `${value.toFixed(2)}`}
+                    formatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(2)}` : ''}
                     contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px' }}
                     labelStyle={{ color: '#fff' }}
                   />
