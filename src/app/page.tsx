@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Plus, X } from 'lucide-react';
+import { TrendingUp, TrendingDown, Plus, X, Trash2 } from 'lucide-react';
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line } from 'recharts';
 
 type Transaction = {
   id: string;
@@ -31,9 +32,14 @@ export default function PortfolioDashboard() {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchingPrices, setFetchingPrices] = useState(false);
+  const [snapshots, setSnapshots] = useState<any[]>([]);
+  const [filteredSnapshots, setFilteredSnapshots] = useState<any[]>([]);
+  const [showAllHistory, setShowAllHistory] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     fetchTransactions();
+    fetchSnapshots();
   }, []);
 
   const fetchTransactions = async () => {
@@ -46,6 +52,67 @@ export default function PortfolioDashboard() {
     } catch (error) {
       console.error('Error fetching transactions:', error);
       setLoading(false);
+    }
+  };
+
+  const fetchSnapshots = async () => {
+    try {
+      const res = await fetch('/api/portfolio-snapshots');
+      const data = await res.json();
+      setSnapshots(data);
+      setFilteredSnapshots(data);
+    } catch (error) {
+      console.error('Error fetching snapshots:', error);
+    }
+  };
+
+  const filterToCurrentHoldings = () => {
+    if (transactions.length === 0 || holdings.length === 0) return;
+
+    // Get all tickers in current holdings
+    const currentTickers = holdings.map(h => h.ticker);
+
+    // Find the earliest transaction date for current holdings
+    const currentHoldingsTxns = transactions.filter(t => currentTickers.includes(t.ticker));
+    
+    if (currentHoldingsTxns.length === 0) {
+      setFilteredSnapshots([]);
+      return;
+    }
+
+    const earliestDate = new Date(
+      Math.min(...currentHoldingsTxns.map(t => new Date(t.transaction_date).getTime()))
+    );
+
+    // Filter snapshots to only show dates after the earliest current holding
+    const filtered = snapshots.filter(s => new Date(s.date) >= earliestDate);
+    setFilteredSnapshots(filtered);
+    setShowAllHistory(false);
+  };
+
+  const showAllSnapshots = () => {
+    setFilteredSnapshots(snapshots);
+    setShowAllHistory(true);
+  };
+
+  const handleRefreshData = async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch('/api/refresh-snapshots', {
+        method: 'POST',
+      });
+      
+      if (res.ok) {
+        await fetchSnapshots();
+        alert('Data refreshed successfully!');
+      } else {
+        alert('Failed to refresh data. Check console for errors.');
+      }
+    } catch (error) {
+      console.error('Error refreshing data:', error);
+      alert('Error refreshing data');
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -125,6 +192,33 @@ export default function PortfolioDashboard() {
 
   const metrics = calculateMetrics();
 
+  const COLORS = ['#a78bfa', '#c084fc', '#e879f9', '#f0abfc', '#fda4af', '#fb923c', '#fbbf24', '#a3e635'];
+
+  // Prepare data for charts
+  const allocationData = holdings.map((holding, idx) => ({
+    name: holding.ticker,
+    value: holding.shares * holding.currentPrice,
+    color: COLORS[idx % COLORS.length],
+  }));
+
+  const plData = holdings.map((holding) => {
+    const marketValue = holding.shares * holding.currentPrice;
+    const totalCost = holding.shares * holding.avgCost;
+    const pl = marketValue - totalCost;
+    return {
+      ticker: holding.ticker,
+      pl: parseFloat(pl.toFixed(2)),
+      fill: pl >= 0 ? '#4ade80' : '#f87171',
+    };
+  });
+
+  // Prepare historical performance data
+  const performanceData = filteredSnapshots.map((snapshot) => ({
+    date: new Date(snapshot.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    value: snapshot.total_value,
+    cost: snapshot.total_cost,
+  }));
+
   const handleSubmit = async () => {
     if (!formData.ticker || !formData.shares || !formData.price || !formData.date) {
       alert('Please fill in all fields');
@@ -153,6 +247,27 @@ export default function PortfolioDashboard() {
     } catch (error) {
       console.error('Error:', error);
       alert('Error adding transaction');
+    }
+  };
+
+  const handleDeleteStock = async (ticker: string) => {
+    if (!confirm(`Delete all transactions for ${ticker}?`)) {
+      return;
+    }
+
+    try {
+      const transactionsToDelete = transactions.filter(t => t.ticker === ticker);
+      
+      for (const txn of transactionsToDelete) {
+        await fetch(`/api/transactions/${txn.id}`, {
+          method: 'DELETE',
+        });
+      }
+
+      fetchTransactions();
+    } catch (error) {
+      console.error('Error deleting transactions:', error);
+      alert('Error deleting transactions');
     }
   };
 
@@ -218,6 +333,119 @@ export default function PortfolioDashboard() {
             <p className="text-gray-400 text-sm">Across {holdings.length} positions</p>
           </div>
         </div>
+
+        {/* Historical Performance Chart */}
+        {snapshots.length > 0 && (
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 mb-8">
+            <h3 className="text-lg font-semibold text-white mb-4">Portfolio Performance Over Time</h3>
+            
+            <div className="flex flex-wrap gap-3 mb-4">
+              <button
+                onClick={filterToCurrentHoldings}
+                disabled={!showAllHistory}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition
+                  ${!showAllHistory
+                    ? 'bg-purple-800 text-purple-300 cursor-not-allowed'
+                    : 'bg-purple-600 hover:bg-purple-700 text-white'}
+                `}
+              >
+                Current Holdings Only
+              </button>
+
+              <button
+                onClick={showAllSnapshots}
+                disabled={showAllHistory}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition
+                  ${showAllHistory
+                    ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
+                    : 'bg-zinc-600 hover:bg-zinc-500 text-white'}
+                `}
+              >
+                Show All History
+              </button>
+
+              <button
+                onClick={handleRefreshData}
+                disabled={refreshing}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition
+                  ${refreshing
+                    ? 'bg-green-800 text-green-300 cursor-not-allowed'
+                    : 'bg-green-600 hover:bg-green-700 text-white'}
+                `}
+              >
+                {refreshing ? 'Refreshing…' : 'Refresh Data'}
+              </button>
+            </div>
+
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={performanceData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" />
+                <XAxis dataKey="date" stroke="#9ca3af" />
+                <YAxis stroke="#9ca3af" />
+                {/* @ts-ignore */}
+                <Tooltip 
+                  formatter={(value: any) => `$${Number(value).toFixed(2)}`}
+                  contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px' }}
+                  labelStyle={{ color: '#fff' }}
+                />
+                <Legend />
+                <Line type="monotone" dataKey="value" stroke="#a78bfa" strokeWidth={2} name="Portfolio Value" />
+                <Line type="monotone" dataKey="cost" stroke="#9ca3af" strokeWidth={2} name="Total Invested" strokeDasharray="5 5" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}    
+
+        {/* Charts Section */}
+        {holdings.length > 0 && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Portfolio Allocation Pie Chart */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-white mb-4">Portfolio Allocation</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={allocationData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(1)}%`}
+                    outerRadius={100}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {allocationData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip 
+                    formatter={(value: number) => `${value.toFixed(2)}`}
+                    contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px' }}
+                    labelStyle={{ color: '#fff' }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* P&L Bar Chart */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-white mb-4">Profit & Loss by Holding</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={plData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" />
+                  <XAxis dataKey="ticker" stroke="#9ca3af" />
+                  <YAxis stroke="#9ca3af" />
+                  <Tooltip 
+                    formatter={(value: number) => `${value.toFixed(2)}`}
+                    contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px' }}
+                    labelStyle={{ color: '#fff' }}
+                  />
+                  <Bar dataKey="pl" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
 
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-6">
           <div className="flex justify-between items-center p-6 border-b border-zinc-800">
@@ -297,6 +525,7 @@ export default function PortfolioDashboard() {
                     <th className="text-right p-4 text-gray-400 font-medium">Current Price</th>
                     <th className="text-right p-4 text-gray-400 font-medium">Market Value</th>
                     <th className="text-right p-4 text-gray-400 font-medium">Total P&L</th>
+                    <th className="text-right p-4 text-gray-400 font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -316,6 +545,15 @@ export default function PortfolioDashboard() {
                         <td className="p-4 text-right font-semibold text-white">${marketValue.toFixed(2)}</td>
                         <td className={`p-4 text-right font-semibold ${totalPL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           ${totalPL.toFixed(2)} ({totalPLPercent}%)
+                        </td>
+                        <td className="p-4 text-right">
+                          <button
+                            onClick={() => handleDeleteStock(holding.ticker)}
+                            className="text-gray-400 hover:text-red-500 transition-colors p-2"
+                            title="Delete all transactions"
+                          >
+                            <Trash2 size={18} />
+                          </button>
                         </td>
                       </tr>
                     );
