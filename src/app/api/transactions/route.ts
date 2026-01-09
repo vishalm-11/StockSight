@@ -83,3 +83,44 @@ export async function GET() {
     );
   }
 }
+
+export async function DELETE() {
+  try {
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json(
+        { error: 'Missing Supabase environment variables. Please check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY' },
+        { status: 500 }
+      );
+    }
+
+    // Get the default portfolio
+    const { data: portfolio, error: portfolioError } = await supabase
+      .from('portfolios')
+      .select('id')
+      .single();
+
+    if (portfolioError || !portfolio) {
+      console.error('Portfolio error:', portfolioError);
+      return NextResponse.json({ error: 'No portfolio found' }, { status: 404 });
+    }
+
+    // Delete all transactions for this portfolio
+    const { error: deleteError, count } = await supabase
+      .from('transactions')
+      .delete()
+      .eq('portfolio_id', portfolio.id);
+
+    if (deleteError) {
+      console.error('DELETE /api/transactions error:', deleteError);
+      return NextResponse.json({ error: deleteError.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, message: 'All transactions deleted' });
+  } catch (error: any) {
+    console.error('DELETE /api/transactions error:', error);
+    return NextResponse.json(
+      { error: error.message || 'Failed to delete transactions' },
+      { status: 500 }
+    );
+  }
+}

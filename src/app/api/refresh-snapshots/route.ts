@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
+import { existsSync } from 'fs';
 
 const execAsync = promisify(exec);
 
@@ -11,30 +12,43 @@ export async function POST() {
     const venvPython = path.join(pipelinePath, 'venv', 'bin', 'python');
     
     // Check if venv exists, if not try using system python
-    let pythonCmd = venvPython;
-    try {
-      const { execSync } = require('child_process');
-      execSync(`test -f ${venvPython}`, { stdio: 'ignore' });
-    } catch {
-      // Venv doesn't exist, try system python
-      pythonCmd = 'python3';
+    let pythonCmd = 'python3';
+    if (existsSync(venvPython)) {
+      pythonCmd = venvPython;
+      console.log('Using venv Python:', pythonCmd);
+    } else {
+      console.log('Venv not found, using system python3');
     }
     
     // Run fetch historical data
     console.log('Fetching historical data...');
-    const fetchResult = await execAsync(`cd ${pipelinePath} && ${pythonCmd} fetch_historical_data.py`, {
+    const fetchCommand = `cd "${pipelinePath}" && ${pythonCmd} fetch_historical_data.py`;
+    console.log('Running:', fetchCommand);
+    
+    const fetchResult = await execAsync(fetchCommand, {
       maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      cwd: pipelinePath,
     });
-    console.log('Fetch output:', fetchResult.stdout);
-    if (fetchResult.stderr) console.error('Fetch errors:', fetchResult.stderr);
+    
+    console.log('Fetch stdout:', fetchResult.stdout);
+    if (fetchResult.stderr && fetchResult.stderr.trim()) {
+      console.warn('Fetch stderr:', fetchResult.stderr);
+    }
     
     // Run calculate snapshots
     console.log('Calculating snapshots...');
-    const calcResult = await execAsync(`cd ${pipelinePath} && ${pythonCmd} calculate_snapshots.py`, {
+    const calcCommand = `cd "${pipelinePath}" && ${pythonCmd} calculate_snapshots.py`;
+    console.log('Running:', calcCommand);
+    
+    const calcResult = await execAsync(calcCommand, {
       maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      cwd: pipelinePath,
     });
-    console.log('Calculate output:', calcResult.stdout);
-    if (calcResult.stderr) console.error('Calculate errors:', calcResult.stderr);
+    
+    console.log('Calculate stdout:', calcResult.stdout);
+    if (calcResult.stderr && calcResult.stderr.trim()) {
+      console.warn('Calculate stderr:', calcResult.stderr);
+    }
     
     return NextResponse.json({ 
       success: true, 
@@ -46,10 +60,13 @@ export async function POST() {
     });
   } catch (error: any) {
     console.error('Error refreshing snapshots:', error);
+    const errorMessage = error.message || 'Failed to refresh snapshots';
+    const errorDetails = error.stdout || error.stderr || error.message;
+    
     return NextResponse.json({ 
       success: false, 
-      error: error.message || 'Failed to refresh snapshots',
-      details: error.stdout || error.stderr
+      error: errorMessage,
+      details: errorDetails
     }, { status: 500 });
   }
 }
